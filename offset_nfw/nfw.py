@@ -324,8 +324,8 @@ class NFWModel(object):
             # close to the peak
             wmid, = np.where( (ratio<=100.) & (ratio>=1/100.) )
             xint = thetaFunctionSampling(x[wmid],rmis,int(self.nsize))
-            integral, err = sigmaMis(xint,rmis)
-            intF = interp1d(np.log(xint), np.log(integral), fill_value='extrapolate')
+            _integral, err = sigmaMis(xint,rmis)
+            intF = interp1d(np.log(xint), np.log(_integral), fill_value='extrapolate')
 
             # at x100 Rmis we can safely assume the asymptotic solution
             yhig = f_nfw(self.table_x)
@@ -334,9 +334,10 @@ class NFWModel(object):
             integral[wmid] = np.exp(intF(np.log(x[wmid])))
 
             res[i] = integral
-            error[i] = np.nanmean(err)
+            error[i] = np.nanmean(err/_integral)
 
         self._miscentered_sigma = res
+        self._miscentered_sigma_err = error
         if save:
             np.save(self.table_file_root+'_miscentered_sigma.npy', self._miscentered_sigma)
             np.save(self.table_file_root+'_miscentered_sigma_error.npy', error)
@@ -407,7 +408,7 @@ class NFWModel(object):
             [default: True]
         gamma : bool
             Generate tables for Gamma miscentering distribution. 
-            [default: True]
+            [default: True]            
         """
         if sigma:
             tupdate("before tables")
@@ -418,6 +419,42 @@ class NFWModel(object):
             tupdate("before gamma")
             self._buildGammaSigma(save=save, force=force)
         tupdate("finished")
+
+    def generate_miscentered_sigma_parallel(self,x,sigma=True,save=False):
+        """generate_miscentered_sigma_parallel 
+
+        Uses a rectangular grid instead of a square one.
+
+        Args:
+            x (array): the R/R_s radii array used
+        """
+        xmis = self.table_x
+        res = np.zeros((xmis.size, x.size))
+        error = np.zeros(xmis.size)
+        
+        
+        for i,rmis in enumerate(xmis):
+            ratio = x/rmis
+
+            # close to the peak
+            wmid, = np.where( (ratio<=100.) & (ratio>=1/100.) )
+            xint = thetaFunctionSampling(x[wmid],rmis,int(nsize))
+            _integral, err = sigmaMis(xint,rmis)
+            intF = interp1d(np.log(xint), np.log(_integral), fill_value='extrapolate')
+
+            # at x100 Rmis we can safely assume the asymptotic solution
+            yhig = f_nfw(x)
+            ylow = f_nfw(rmis)
+            integral = np.where(ratio>=100.,yhig,ylow)
+            integral[wmid] = np.exp(intF(x))
+
+            res[i] = integral
+            error[i] = np.nanmean(err/_integral)
+
+        self.table_x2 = x
+        self._miscentered_sigma = res
+        self._miscentered_sigma_err = error
+        pass
 
     def _loadTables(self, sigma=True, gamma=True):
         self._buildTables()

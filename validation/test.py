@@ -7,7 +7,7 @@ path = os.getcwd().split('/validation')[0]
 print(path)
 sys.path.append(path)
 from offset_nfw.nfw import NFWModel
-
+import astropy.cosmology
 cosmology = astropy.cosmology.Planck15
 model = NFWModel(cosmology, sigma=True, gamma=True, nsize=100, x_range=(0.01,10.))
 model.generate(sigma=True)
