@@ -58,3 +58,6 @@ target/
 
 # Saved data files
 *.npy
+
+# log files
+*log*
