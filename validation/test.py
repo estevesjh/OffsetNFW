@@ -1,9 +1,15 @@
 import astropy.cosmology
 import matplotlib.pyplot as plt
-from nfw_misc import NFWModel
+
+import sys
+import os
+path = os.getcwd().split('/validation')[0]
+print(path)
+sys.path.append(path)
+from offset_nfw.nfw import NFWModel
 
 cosmology = astropy.cosmology.Planck15
-model = NFWModel(cosmology, sigma=True, gamma=True, nsize=1000, x_range=(0.001,1000.))
+model = NFWModel(cosmology, sigma=True, gamma=True, nsize=100, x_range=(0.01,10.))
 model.generate(sigma=True)
 model.generate(gamma=True)
 
