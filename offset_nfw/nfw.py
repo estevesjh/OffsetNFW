@@ -5,6 +5,13 @@ from scipy.integrate import quad, simps
 from scipy.interpolate import SmoothBivariateSpline
 import astropy.units as u
 
+######################################################################
+## Absolute and Relative Error used in quad
+## Integration over theta
+## If you change you need to regenerate the library
+EPSABS = 1e-5
+EPSREL = 1.49e-4
+
 import time
 t0 = time.time()
 def tupdate(s):
@@ -19,19 +26,16 @@ def tupdate(s):
 
 class NFWModel(object):
     r"""
-    A class that generates offset (miscentered) NFW halo profiles.  The basic purpose of this class
-    is to generate internal interpolation tables for fast computation of the common NFW lensing 
-    quantities, but it includes direct computation of the non-miscentered versions for completeness.
+    A class that predicts off-centered nfw profiles.
     
     Initializing a class is easy.  You need a cosmology object like those created by astropy,
     since we need to know overdensities.  Once you have one:
     >>>  from offset_nfw import NFWModel
     >>>  nfw_model = NFWModel(cosmology)
     
-    However, this won't have any internal interpolation tables (unless you've already created them
-    in the directory you're working in).  To do that, you should use the class method 
-    :ref:`generate``:
-    >>>  nfw_model.generate()
+    If you change the x_range and Nsize you need to new interpolation tables
+    To do that, you should run the python script:
+    >>>  python eval_parallel.py
     If you want to use tables you generated in another directory, simply pass the directory name:
     >>>  nfw_model = NFWModel(cosmology, dir='nfw_tables')
     
@@ -42,7 +46,7 @@ class NFWModel(object):
         $\rho_m$ or $\rho_c$.
     dir : str
         The directory where the saved tables should be stored (will be interpreted through
-        ``os.path``). [default: '.']
+        ``os.path``). [default: './data/']
     rho : str
         Which type of overdensity to use for the halo, `'rho_m'` or `'rho_c'`.  These correspond to
         measuring the overdensity relative to the matter density ($\rho_m$) or the critical density
@@ -53,44 +57,66 @@ class NFWModel(object):
         The min-max range of x (=r/r_s) for the interpolation table. Precision is not guaranteed for 
         values other than the default.  [default: (0.001, 1000)]
     """
-    def __init__(self, cosmology, mydir='.', rho='rho_c', nsize=100,
-                delta=200, Nsize=100, x_range=(0.001, 1000),
-                sigma=True, gamma=True):
+    def __init__(self, cosmology, mydir='./data/', rho='rho_c',
+                delta=200, Nsize=5000, x_range=(0.001, 1000)):
         # size to create the integration vector
         self.x_range = x_range
         dx = 2*np.log(x_range[1]/x_range[0])
-        self.nsize = nsize
-        print('Nsize :', self.nsize)
+        self.nsize = Nsize
 
         if not os.path.exists(mydir):
             raise RuntimeError("Nonexistent save directory passed to NFWModel")
         self.dir = mydir
 
+        if not (hasattr(cosmology, "critical_density") and 
+                hasattr(cosmology, "critical_density0") and
+                hasattr(cosmology, "Om")):
+            raise RuntimeError("Must pass working cosmology object to NFWModel")
+        self.cosmology = cosmology
+
         if not rho in ['rho_c', 'rho_m']:
             raise RuntimeError("Only rho_c and rho_m currently implemented")
         self.rho = rho
         self.delta = delta
+        
         # Useful quantity in scaling profiles
         self._rmod = (3./(4.*np.pi)/self.delta)**0.33333333
 
-        self.table_file_root = os.path.join(self.dir, '.offset_nfw_table')
-        self.table_file_root = self.table_file_root+'_nsize_%i_xrange_%.4f_%.1f'%(
-                                                        self.nsize, x_range[0], x_range[1])
+        self.table_file_root = mydir
+        xlow, xhig = x_range
+        self.table_fname = os.path.join(self.table_file_root,
+                                        'offset_nfw_table_%i_%.0e_%.0e'%(Nsize,xlow,xhig))
 
-        self._loadTables(sigma, gamma)
-        self.do_sigma = sigma
-        self.do_gamma = gamma
+        # if sigma:
+        self._loadTables()
     
     def nfw_norm(self, M, c, z):
         """ Return the normalization for delta sigma and sigma. """
         c = np.asarray(c)
         z = np.asarray(z)
-        if not isinstance(M, u.Quantity):
-            M = (np.asarray(M)*u.Msun).to(u.g)
         deltac=self.delta/3.*c*c*c/(np.log(1.+c)-c/(1.+c))
         rs = self.scale_radius(M, c, z)
         return rs*deltac*self.reference_density(z)
-    
+
+    def scale_radius(self, M, c, z):
+        """ Return the scale radius in comoving Mpc. """
+        c = np.asarray(c)
+        z = np.asarray(z)
+        if not isinstance(M, u.Quantity):
+            M = (M*u.Msun)
+        rs = self._rmod/c*(M/self.reference_density(z))**0.33333333
+        return rs.to(u.Mpc**0.99999999)  # to deal with fractional powers
+
+    def reference_density(self, z):
+        """Return the reference density for this halo: that is, critical density for rho_c,
+        or matter density for rho_m. Physical NOT COMOVING"""
+        if self.rho=='rho_c':
+            dens = self.cosmology.critical_density(z)
+            return dens.to('Msun/Mpc^3')
+        else:
+            dens = self.cosmology.Om0*self.cosmology.critical_density0
+            return (dens*(1.+z)**3).to('Msun/Mpc^3')
+
     def sigma(self, r, M, c, z, r_mis=0, kernel='gamma'):
         """Return an optionally miscentered NFW sigma from an internal interpolation table.
         
@@ -131,28 +157,19 @@ class NFWModel(object):
             (which of course may be only one item!), then this returns an array of shape
             ``(n1, n2, ..., nn, len(r))``.
         """
-        rs = self.scale_radius(M, c, z)
-        if not isinstance(r, u.Quantity):
-            r = r*u.Mpc
-        x = np.atleast_1d((r/rs).decompose().value)
-        if isinstance(r_mis, float):
-            if not isinstance(r_mis, u.Quantity):
-                r_mis = r_mis*u.Mpc
-        else:
-            raise RuntimeError("r_mis should be a float number")
-
-        x_mis = np.atleast_1d((r_mis/rs).decompose().value)
-        norm = self.nfw_norm(M, c, z)
+        rs = self.scale_radius(M, c, z).value
+        x = np.atleast_1d(r/rs)
+        x_mis = np.atleast_1d(r_mis/rs)
+        norm = self.nfw_norm(M, c, z).value
         
         # for a given kernel it gets the respective interpolation table
-        sigma_profile = self.getProfileVariable(kernel,'sigma')
+        u_profile = self.getProfileVariable(kernel,'sigma')
 
         zeromask = x_mis==0.
         if np.all(zeromask):
             return_vals = self.unitary_sigma_theory(x)
         else:
-            clipx = np.clip(x_mis, self.table_x[0], None)
-            return_vals = sigma_profile(x, clipx)
+            return_vals = u_profile(x, x_mis)
         return_vals = norm*return_vals
         return return_vals
 
@@ -178,7 +195,7 @@ class NFWModel(object):
         
         Returns
         -------
-        float or numpy.ndarray
+        float or np.ndarray
             Returns the value of sigma at the requested parameters. If every parameter was a
             float, this is a float. If only r OR some of the non-r parameters were iterable, this is
             a 1D array with the same length as the iterable parameters.  If both r and another
@@ -219,7 +236,7 @@ class NFWModel(object):
         
         Returns
         -------
-        float or numpy.ndarray
+        float or np.ndarray
             Returns the value of delta sigma at the requested parameters. If every parameter was a
             float, this is a float. If only r OR some of the non-r parameters were iterable, this is
             a 1D array with the same length as the iterable parameters.  If both r and another
@@ -278,89 +295,56 @@ class NFWModel(object):
         """
         return g_nfw(x)
 
+    def _loadTables(self):
+        self._buildTables()
+        is_miscentered = os.path.isfile(self.table_fname+'_miscentered.npz')
+        is_gamma = os.path.isfile(self.table_fname+'_gamma.npz')
+        if is_miscentered:
+            lib = np.load(self.table_fname+'_miscentered.npz')
+            self._miscentered_sigma = lib['sigma_mis']
+            self._miscentered_sigma_err = lib['sigma_mis_err']
+            self._setupMiscenteredSigma()
+
+        if is_gamma:
+            lib = np.load(self.table_fname+'_gamma.npz')
+            self._gamma_sigma = lib['sigma_gamma']
+            self.table_tau = lib['tau']
+            self._setupGammaSigma()
+
     def _buildTables(self):
-        self.table_x = np.logspace(np.log10(self.x_range[0]), np.log10(self.x_range[1]), max(2,self.nsize))
-        #self.table_x = thetaFunctionSampling(self.table_x2,int(self.nsize))
-        self.x_min = np.min(self.table_x)
-        self.x_max = np.max(self.table_x)
-        self.dx = np.log(self.table_x[1]/self.table_x[0])*self.table_x
+        if not os.path.isfile(self.table_fname+'_miscentered.npz'):
+            print('Grid Table Not Found %s'%(self.table_fname+'_miscentered.npz'))
+            print('Please generate a new table for new x_range and Nsize')
 
-    def _buildMiscenteredSigma(self, save=True, force=False):
-        if (not force) and os.path.isfile(self.table_file_root+'_miscentered_sigma.npy'):
-            self._miscentered_sigma = np.load(self.table_file_root+'_miscentered_sigma.npy')
+            self.table_x = np.logspace(np.log10(self.x_range[0]), np.log10(self.x_range[1]), max(2,self.nsize))
+            #self.table_x = thetaFunctionSampling(self.table_x2,int(self.nsize))
+            self.x_min = np.min(self.table_x)
+            self.x_max = np.max(self.table_x)
+            self.dx = np.log(self.table_x[1]/self.table_x[0])*self.table_x
         else:
-            self.generate_miscentered_sigma(save)
-            #self._miscentered_sigma = np.load(self.table_file_root+'_miscentered_sigma.npz')
-        self._setupMiscenteredSigma()
-    
-    def _buildGammaSigma(self, save=True, force=False):
-        is_file1 = os.path.isfile(self.table_file_root+'_gamma_sigma.npy')
+            lib = np.load(self.table_fname+'_miscentered.npz')
+            self.table_x = lib['x']
+            self.table_xmis = lib['xmis']
+            # lib = np.load(self.table_fname+'_gamma.npz')
+            # self.table_tau = lib['tau']
 
-        if (not force) and (is_file1):
-            self._gamma_sigma = np.load(self.table_file_root+'_gamma_sigma.npy')
-        else:
-            self.generate_gamma_sigma(save)
-            #self._gamma_sigma = np.load(self.table_file_root+'_gamma_sigma.npz')
-        self._setupGammaSigma()
-
-    def _buildMiscenteredDeltaSigma(self, save=True):
-        self._miscentered_deltasigma = np.array([self.sigma_to_deltasigma(self.table_x, ms) for ms in self._miscentered_sigma])
-        if save:
-            np.save(self.table_file_root+'_miscentered_deltasigma.npy', self._miscentered_deltasigma)
-    
-    def _buildGammaDeltaSigma(self, save=True):
-        self._gamma_deltasigma = np.array([self.sigma_to_deltasigma(self.table_x, ms) for ms in self._gamma_sigma])
-        if save:
-            np.save(self.table_file_root+'_gamma_deltasigma.npy', self._miscentered_deltasigma)
-
-    def generate_miscentered_sigma(self, save=True):
-        res = np.zeros((self.table_x.size,self.table_x.size))
-        error = np.zeros(self.table_x.size)
-        
-        x = self.table_x
-        for i,rmis in enumerate(x):
-            ratio = x/rmis
-
-            # close to the peak
-            wmid, = np.where( (ratio<=100.) & (ratio>=1/100.) )
-            xint = thetaFunctionSampling(x[wmid],rmis,int(self.nsize))
-            _integral, err = sigmaMis(xint,rmis)
-            intF = interp1d(np.log(xint), np.log(_integral), fill_value='extrapolate')
-
-            # at x100 Rmis we can safely assume the asymptotic solution
-            yhig = f_nfw(self.table_x)
-            ylow = f_nfw(rmis)
-            integral = np.where(ratio>=100.,yhig,ylow)
-            integral[wmid] = np.exp(intF(np.log(x[wmid])))
-
-            res[i] = integral
-            error[i] = np.nanmean(err/_integral)
-
-        self._miscentered_sigma = res
-        self._miscentered_sigma_err = error
-        if save:
-            np.save(self.table_file_root+'_miscentered_sigma.npy', self._miscentered_sigma)
-            np.save(self.table_file_root+'_miscentered_sigma_error.npy', error)
-        pass
 
     def _setupMiscenteredSigma(self):
-        # TODO: Implement 2d interpolation
-        pass
-        # x2, x2 = np.meshgrid(self.table_x,self.table_x)
-        # kx = ky = 3
-        # xflat = np.log(x2.flatten())
-        # yflat = xflat
-        # zflat = np.log(self._miscentered_sigma.flatten())
-
-        # bad = np.isnan(zflat)|np.isinf(zflat)
-        # fit = SmoothBivariateSpline( xflat[~bad], yflat[~bad], zflat[~bad], kx=kx, ky=ky)
-        # self._miscentered_sigma_table = lambda x,xm: np.exp(fit(np.log(x),np.log(xm)))
+        clipx = self.table_xmis#np.clip(self.table_xmis, self.table_x[0], self.table_x[-1])
+        iXmis = lambda xmis: int(np.interp(xmis, clipx, np.arange(clipx.size)))
+        self.u_miscentered_sigma = lambda x, xmis: interp1d(np.log(self.table_x),self._miscentered_sigma[iXmis(xmis)],fill_value='extrapolate')(np.log(x))
 
     def _setupGammaSigma(self):
-        # TODO: Implement 2d interpolation
+        clipx = self.table_tau#np.clip(self.table_tau, self.table_x[0], self.table_x[-1])
+        iTau = lambda tau: int(np.interp(tau, clipx, np.arange(clipx.size)))
+        self.u_gamma_sigma = lambda x, tau: interp1d(np.log(self.table_x),self._gamma_sigma[iTau(tau)],fill_value='extrapolate')(np.log(x))
         pass
-        # self._gamma_sigma_table = interp2d(
-        #     np.log(self.table_x), np.log(self.table_x), self._gamma_sigma, kind='cubic')
+
+    def _buildMiscenteredDeltaSigma(self, save=True):
+        pass
+    
+    def _buildGammaDeltaSigma(self, save=True):
+        pass
 
     def _setupMiscenteredDeltaSigma(self):
         # TODO: Implement 2d interpolation
@@ -369,58 +353,31 @@ class NFWModel(object):
     def _setupGammaDeltaSigma(self):
         # TODO: Implement 2d interpolation
         pass
-        # self._miscentered_deltasigma_table = scipy.interpolate.RegularGridInterpolator(
-        #     (numpy.log(self.table_x), numpy.log(self.table_x)), self._miscentered_deltasigma)
-
 
     def probGamma(self, R, Rs):
         return np.exp(-R/Rs)*R/Rs**2
 
-    def generate_gamma_sigma(self, save=True):
-        # we restrict the  xmisc range
-        # a factor is x10 smaller
-        # at the border we cannot integrate over 
-        # the P(R,Rmis)
-        res = np.zeros((self.nsize,self.nsize))
-        x = self.table_x
-        
+    def _buildGammaSigma(self):
         try:
-            _res = self._miscentered_sigma.copy()
+            _single = self._miscentered_sigma.copy()
+            res = np.zeros_like(self._miscentered_sigma)
         except:
             raise RuntimeError("Nonexistent mis-centered sigma")
-
-        self._gamma_sigma = np.array([simps(self.probGamma(x, xm)[:,np.newaxis]*_res,x=x,axis=0) for xm in x])
-        if save:
-            np.save(self.table_file_root+'_gamma_sigma.npy', self._gamma_sigma)
+        x = self.table_xmis
+        self._gamma_sigma = np.array([np.trapz(self.probGamma(x, xm)[:,np.newaxis]*_single,x=x,axis=0) for xm in x])
         pass
-        
-    def generate(self, sigma=True, gamma=False, save=True,
-                       force=False):
-        """
-        Generate internal interpolation tables using the settings specified when the NFWModel
-        instance was created.  Note that this method does **not** check for existing tables before
-        writing over them.
-        
-        Parameters
-        ----------
-        sigma : bool
-            Generate tables for computing $\Sigma$ and related quantities ($\kappa$). 
-            [default: True]
-        gamma : bool
-            Generate tables for Gamma miscentering distribution. 
-            [default: True]            
-        """
-        if sigma:
-            tupdate("before tables")
-            self._buildTables()
-            tupdate("before sigle miscentering")
-            self._buildMiscenteredSigma(save, force=force)
-        if gamma:
-            tupdate("before gamma")
-            self._buildGammaSigma(save=save, force=force)
-        tupdate("finished")
 
-    def generate_miscentered_sigma_parallel(self,x,sigma=True,save=False):
+    def getProfileVariable(self, kernel, ptype):
+        """ Given a kernel and profile type string return the respective interpolation function
+
+        E.g. self.getProfileVariable('gamma','sigma') -> self._gamma_sigma_table 
+        Basically, gives the gamma sigma interpolation function
+        """
+        sigma_profile_dict = {'single': 'miscentered','gamma':'gamma','rayleigh':'rayleigh'}
+        var_name = 'u_%s_%s'%(sigma_profile_dict[kernel],ptype)
+        return getattr(self, var_name)
+    
+    def generate_miscentered_sigma_parallel(self,x,nsize=int(4./EPSREL)):
         """generate_miscentered_sigma_parallel 
 
         Uses a rectangular grid instead of a square one.
@@ -432,69 +389,75 @@ class NFWModel(object):
         res = np.zeros((xmis.size, x.size))
         error = np.zeros(xmis.size)
         
-        
         for i,rmis in enumerate(xmis):
             ratio = x/rmis
 
             # close to the peak
-            wmid, = np.where( (ratio<=100.) & (ratio>=1/100.) )
-            xint = thetaFunctionSampling(x[wmid],rmis,int(nsize))
+            wsel, = np.where( (ratio<=101.) & (ratio>=1/101.) )
+            xint = thetaFunctionSampling(x[wsel],rmis,nsize)
             _integral, err = sigmaMis(xint,rmis)
-            intF = interp1d(np.log(xint), np.log(_integral), fill_value='extrapolate')
+
+            isnan = np.isnan(_integral)
+            intF = interp1d(np.log(xint[~isnan]), np.log(_integral[~isnan]))
 
             # at x100 Rmis we can safely assume the asymptotic solution
             yhig = f_nfw(x)
             ylow = f_nfw(rmis)
             integral = np.where(ratio>=100.,yhig,ylow)
-            integral[wmid] = np.exp(intF(x))
+            wmid, = np.where( (ratio<=100.) & (ratio>=1/100.) )
+            integral[wmid] = np.exp(intF(np.log(x[wmid])))
 
             res[i] = integral
             error[i] = np.nanmean(err/_integral)
 
-        self.table_x2 = x
+        self.table_xmis = x
         self._miscentered_sigma = res
         self._miscentered_sigma_err = error
+        self.miscentered_dict = self._todict('miscentered','sigma')
+        pass
+    
+    def generate_gamma_sigma_parallel(self, tauvec, nsize=int(4./EPSREL)):
+        """generate_gamma_sigma_parallel 
+
+        Integrate over the xmis of signle mis-centered cluster
+        For a Gamma distribution P(xmis,tau)
+
+        Args:
+            tauvec (array): the gamma distribution tau value
+        """
+        _single = self._miscentered_sigma.copy()
+        nsize = self.table_x.size
+        x = self.table_xmis
+
+        res = np.zeros((tauvec.size,nsize))
+        for i,tau in enumerate(tauvec):
+            res[i] = np.trapz(self.probGamma(x, tau)[:,np.newaxis]*_single,x=x,axis=0)
+
+        self.table_tau = tauvec
+        self._gamma_sigma = res
+        self.gamma_dict = self._todict('gamma','sigma')
         pass
 
-    def _loadTables(self, sigma=True, gamma=True):
-        self._buildTables()
-        
-        if not os.path.isfile(self.table_file_root+'_miscentered_sigma.npy'):
-            print("Nonexistent NFW tables, please run nfw_model.generate()")
+    def _todict(self, kernel, ptype):
+        if kernel=='miscentered':
+            out = {'x1': self.table_xmis, 'x2': self.table_x,
+                   'vec': getattr(self, '_%s_%s'%('miscentered',ptype)),
+                   'vec_err': getattr(self, '_%s_%s_err'%('miscentered',ptype))
+                   }
+            return out
 
-        if sigma:
-            try:
-                if not hasattr(self, '_miscentered_sigma'):
-                    self._miscentered_sigma = np.load(self.table_file_root+'_miscentered_sigma.npy')
-                self._setupMiscenteredSigma()
-            except IOError:
-                pass
-            try:
-                if not hasattr(self, '_gamma_sigma'):
-                    self._gamma_sigma = np.load(self.table_file_root+'_gamma_sigma.npy')
-                self._setupGammaSigma()
-            except IOError:
-                pass
+        if kernel=='gamma':
+            out = {'x1': self.table_x, 'x2': self.table_tau,
+                   'vec': getattr(self, '_%s_%s'%('gamma',ptype)),
+                   'vec_err': np.full((self.table_x.size,),np.nan)}
+            return out
 
-    def getProfileVariable(self, kernel, ptype):
-        """ Given a kernel and profile type string return the respective interpolation function
-
-        E.g. self.getProfileVariable('gamma','sigma') -> self._gamma_sigma_table 
-        Basically, gives the gamma sigma interpolation function
-        """
-        sigma_profile_dict = {'single': '_miscentered','gamma':'_gamma','rayleigh':'_rayleigh'}
-        var_name = sigma_profile_dict[kernel]+'_%s_table'%(ptype)
-        return getattr(self, var_name)
-import scipy
 ## Auxialiary Functions
-def funcQuadVal(r,rm,func,eps=1e-5):
+def funcQuadVal(r,rm,func,eps=EPSREL/10.):
     """Integrates a function (Sigma, DSigma) over theta for r, rm
     """
-    # integral, err = quad(func,0.,2.*np.pi,args=(r,rm),epsrel=1.49e-3,epsabs=1e-3)
-    # return integral/2./np.pi
-
-    integral1, err1 = quad(func,0.,(1-eps)*np.pi,args=(r,rm),epsrel=1.49e-5,epsabs=1e-5)
-    integral2, err2 = quad(func,(1+eps)*np.pi,2*np.pi,args=(r,rm),epsrel=1.49e-5,epsabs=1e-5)
+    integral1, err1 = quad(func,0.,(1-eps)*np.pi,args=(r,rm),epsrel=EPSREL,epsabs=EPSABS)
+    integral2, err2 = quad(func,(1+eps)*np.pi,2*np.pi,args=(r,rm),epsrel=EPSREL,epsabs=EPSABS)
     return (integral1+integral2)/2./np.pi, (err1+err2)/2.
 
 def _sigmaMisQuad(t,r,rs):

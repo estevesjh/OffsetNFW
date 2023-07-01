@@ -61,3 +61,11 @@ target/
 
 # log files
 *log*
+offset_nfw/data/offset_nfw_table_500_1e-03_1e+03.npz
+offset_nfw/data/offset_nfw_table_1000_1e-02_1e+02_gamma.npz
+offset_nfw/data/offset_nfw_table_1000_1e-02_1e+02_miscentered.npz
+offset_nfw/data/offset_nfw_table_1000_1e-02_1e+02.npz
+offset_nfw/data/offset_nfw_table_5000_1e-03_1e+03.npz
+offset_nfw/data/offset_nfw_table_6000_1e-03_1e+03_gamma.npz
+offset_nfw/data/offset_nfw_table_6000_1e-03_1e+03_miscentered.npz
+offset_nfw/data/offset_nfw_table_6000_1e-03_1e+03.npz
