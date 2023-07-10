@@ -1,7 +1,7 @@
 import os
 import numpy as np
 from scipy.interpolate import interp1d, interp2d
-from scipy.integrate import quad, simps
+from scipy.integrate import quad, simps, cumtrapz
 from scipy.interpolate import SmoothBivariateSpline
 import astropy.units as u
 
@@ -9,20 +9,8 @@ import astropy.units as u
 ## Absolute and Relative Error used in quad
 ## Integration over theta
 ## If you change you need to regenerate the library
-EPSABS = 1e-5
+EPSABS = 1.49e-5
 EPSREL = 1.49e-4
-
-import time
-t0 = time.time()
-def tupdate(s):
-    t = time.time()-t0
-    if t<60:
-        print("%.1f seconds have elapsed at point %s"%(t,s))
-    elif t<60*60:
-        print("%.2f minutes have elapsed at point %s"%(t/60.,s))
-    else:
-        print("%i hours and %.2f minutes have elapsed %s"%(int(t/3600), t/60., s))
-    pass
 
 class NFWModel(object):
     r"""
@@ -163,11 +151,67 @@ class NFWModel(object):
         norm = self.nfw_norm(M, c, z).value
         
         # for a given kernel it gets the respective interpolation table
-        u_profile = self.getProfileVariable(kernel,'sigma')
+        u_profile = self.getProfileFunction(kernel,'sigma')
 
         zeromask = x_mis==0.
         if np.all(zeromask):
             return_vals = self.unitary_sigma_theory(x)
+        else:
+            return_vals = u_profile(x, x_mis)
+        return_vals = norm*return_vals
+        return return_vals
+
+    def deltasigma(self, r, M, c, z, r_mis=0, kernel='gamma'):
+        """Return an optionally miscentered NFW sigma from an internal interpolation table.
+        
+        Parameters
+        ----------
+        r : float or iterable
+            The radius or radii (in length, not angular, units) at which to evaluate the function.
+            Whatever definition (comoving/not, etc) you used for your cosmology object should be
+            replicated here.  This can be an object with astropy units of length; if not it is
+            assumed to be in Mpc/h.
+        M : float or iterable
+            The mass of the halo at the overdensity definition given at class initialization. If
+            this is an iterable, all other non-r parameters must be either iterables with the same
+            length or floats. This can be an object with astropy units of mass; if not it is assumed
+            to be in h Msun.
+        c : float or iterable
+            The concentration of the halo at the overdensity definition given at class 
+            initialization.  If this is an iterable, all other non-r parameters must be either
+            iterables with the same length or floats.
+        r_mis : float
+            The distance (in length units) between the reported center of the halo and the actual
+            assumed to be in Mpc/h.
+            center of the halo.  Whatever definition (comoving/not, etc) you used for your cosmology
+            object should be replicated here.  This can be an object with astropy units of length;
+            if not it is assumed to be in Mpc/h.  If this is an iterable, all other non-r parameters
+            must be either iterables with the same length or floats.
+        
+        kernel: str
+            Kernal for convolution. Options: gamma, single or rayleigh.
+        
+        Returns
+        -------
+        float or np.ndarray
+            Returns the value of sigma at the requested parameters. If every parameter was a
+            float, this is a float. If only r OR some of the non-r parameters were iterable, this is
+            a 1D array with the same length as the iterable parameters.  If both r and another
+            parameter were iterable, with the non-r parameter having shape ``(n1, n2, ..., nn)``
+            (which of course may be only one item!), then this returns an array of shape
+            ``(n1, n2, ..., nn, len(r))``.
+        """
+        rs = self.scale_radius(M, c, z).value
+        x = np.atleast_1d(r/rs)
+        x_mis = np.atleast_1d(r_mis/rs)
+        norm = self.nfw_norm(M, c, z).value
+        
+        # for a given kernel it gets the respective interpolation table
+        u_profile = self.getProfileFunction(kernel,'deltasigma')
+
+        zeromask = x_mis==0.
+        if np.all(zeromask):
+            return_vals = self.unitary_deltasigma_theory(x)
         else:
             return_vals = u_profile(x, x_mis)
         return_vals = norm*return_vals
@@ -268,7 +312,7 @@ class NFWModel(object):
         else:
             sigma_unit = 1
         sigma_r = 2*np.pi*r*sigma
-        sum_sigma = scipy.integrate.cumtrapz(sigma_r, r, initial=0)*sigma_unit*r_unit**2
+        sum_sigma = cumtrapz(sigma_r, r, initial=0)*sigma_unit*r_unit**2
         sum_area = np.pi*(r**2-r[0]**2)*r_unit**2
         deltasigma = np.zeros_like(sum_sigma)
         # Linearly interpolate central value, which is nan due to sum_area==0
@@ -288,7 +332,7 @@ class NFWModel(object):
         """
         return f_nfw(x)
 
-    def unitary_deltaSigma_theory(self,x):
+    def unitary_deltasigma_theory(self,x):
         """Unitary NFW \Sigma Profile
         
         Brainerd and Wright 1999 
@@ -299,17 +343,22 @@ class NFWModel(object):
         self._buildTables()
         is_miscentered = os.path.isfile(self.table_fname+'_miscentered.npz')
         is_gamma = os.path.isfile(self.table_fname+'_gamma.npz')
+        
         if is_miscentered:
             lib = np.load(self.table_fname+'_miscentered.npz')
             self._miscentered_sigma = lib['sigma_mis']
             self._miscentered_sigma_err = lib['sigma_mis_err']
             self._setupMiscenteredSigma()
+            self._buildMiscenteredDeltaSigma()
+            self._setupMiscenteredDeltaSigma()
 
         if is_gamma:
             lib = np.load(self.table_fname+'_gamma.npz')
             self._gamma_sigma = lib['sigma_gamma']
             self.table_tau = lib['tau']
             self._setupGammaSigma()
+            self._buildGammaDeltaSigma()
+            self._setupGammaDeltaSigma()
 
     def _buildTables(self):
         if not os.path.isfile(self.table_fname+'_miscentered.npz'):
@@ -340,44 +389,48 @@ class NFWModel(object):
         self.u_gamma_sigma = lambda x, tau: interp1d(np.log(self.table_x),self._gamma_sigma[iTau(tau)],fill_value='extrapolate')(np.log(x))
         pass
 
-    def _buildMiscenteredDeltaSigma(self, save=True):
-        pass
-    
-    def _buildGammaDeltaSigma(self, save=True):
-        pass
-
-    def _setupMiscenteredDeltaSigma(self):
-        # TODO: Implement 2d interpolation
-        pass
+    def _setupMiscenteredDeltaSigma(self, save=True):
+        clipx = np.clip(self.table_xmis, self.table_x[0], self.table_x[-1])
+        iXmis = lambda xmis: int(np.interp(xmis, clipx, np.arange(clipx.size)))
+        self.u_miscentered_deltasigma = lambda x, xmis: interp1d(np.log(self.table_x),self._miscentered_deltasigma[iXmis(xmis)],fill_value=0.,bounds_error=False)(np.log(x))
     
     def _setupGammaDeltaSigma(self):
-        # TODO: Implement 2d interpolation
+        clipx = np.clip(self.table_tau, self.table_x[0], self.table_x[-1])
+        iTau = lambda tau: int(np.interp(tau, clipx, np.arange(clipx.size)))
+        self.u_gamma_deltasigma = lambda x, tau: interp1d(np.log(self.table_x),self._gamma_deltasigma[iTau(tau)],fill_value=0.,bounds_error=False)(np.log(x))
         pass
 
     def probGamma(self, R, Rs):
         return np.exp(-R/Rs)*R/Rs**2
 
-    def _buildGammaSigma(self):
-        try:
-            _single = self._miscentered_sigma.copy()
-            res = np.zeros_like(self._miscentered_sigma)
-        except:
-            raise RuntimeError("Nonexistent mis-centered sigma")
-        x = self.table_xmis
-        self._gamma_sigma = np.array([np.trapz(self.probGamma(x, xm)[:,np.newaxis]*_single,x=x,axis=0) for xm in x])
-        pass
+    def _buildMiscenteredDeltaSigma(self, save=True):
+        self._miscentered_deltasigma = np.array([self.sigma_to_deltasigma(self.table_x, ms) for ms in self._miscentered_sigma])
+    
+    def _buildGammaDeltaSigma(self, save=True):
+        self._gamma_deltasigma = np.array([self.sigma_to_deltasigma(self.table_x, ms) for ms in self._gamma_sigma])
 
-    def getProfileVariable(self, kernel, ptype):
+    def getProfileFunction(self, kernel, ptype):
         """ Given a kernel and profile type string return the respective interpolation function
 
-        E.g. self.getProfileVariable('gamma','sigma') -> self._gamma_sigma_table 
+        E.g. self.getProfileFunction('gamma','sigma') -> self.u_gamma_sigma
         Basically, gives the gamma sigma interpolation function
         """
         sigma_profile_dict = {'single': 'miscentered','gamma':'gamma','rayleigh':'rayleigh'}
         var_name = 'u_%s_%s'%(sigma_profile_dict[kernel],ptype)
         return getattr(self, var_name)
     
-    def generate_miscentered_sigma_parallel(self,x,nsize=int(4./EPSREL)):
+    def getProfileGrid(self, kernel, ptype):
+        """ Given a kernel and profile type string return the respective interpolation function
+
+        E.g. self.getProfileGrid('gamma','sigma') -> self._gamma_sigma_table 
+        Basically, gives the gamma sigma interpolation function
+        """
+        sigma_profile_dict = {'single': 'miscentered','gamma':'gamma','rayleigh':'rayleigh'}
+        var_name = '_%s_%s'%(sigma_profile_dict[kernel],ptype)
+        return getattr(self, var_name)
+
+    
+    def generate_miscentered_sigma_parallel(self,x,nsize=4000):
         """generate_miscentered_sigma_parallel 
 
         Uses a rectangular grid instead of a square one.
@@ -452,6 +505,97 @@ class NFWModel(object):
                    'vec_err': np.full((self.table_x.size,),np.nan)}
             return out
 
+    def generate_miscentered_deltasigma_parallel(self,x,nsize=int(4./EPSREL)):
+        """generate_miscentered_deltasigma_parallel 
+
+        Uses a rectangular grid instead of a square one.
+
+        Args:
+            x (array): the R/R_s radii array used
+        """
+        xmis = self.table_x
+        res = np.zeros((xmis.size, x.size))
+        error = np.zeros(xmis.size)
+        
+        for i,rmis in enumerate(xmis):
+            ratio = x/rmis
+
+            # close to the peak
+            wsel, = np.where( (ratio<=101.) & (ratio>=1/101.) )
+            xint = thetaFunctionSampling(x[wsel],rmis,nsize)
+            _integral, err = deltaSigmaMis(xint, rmis)
+
+            isnan = np.isnan(_integral)
+            intF = interp1d(np.log(xint[~isnan]), np.log(_integral[~isnan]))
+
+            # at x100 Rmis we can safely assume the asymptotic solution
+            yhig = g_nfw(x)
+            ylow = g_nfw(rmis)
+            integral = np.where(ratio>=100.,yhig,ylow)
+            wmid, = np.where( (ratio<=100.) & (ratio>=1/100.) )
+            integral[wmid] = np.exp(intF(np.log(x[wmid])))
+
+            res[i] = integral
+            error[i] = np.nanmean(err/_integral)
+
+        self.table_xmis = x
+        self._miscentered_deltasigma = res
+        self._miscentered_deltasigma_err = error
+        self.miscentered_delta_dict = self._todict('miscentered','deltasigma')
+        pass
+    
+    def generate_gamma_deltasigma_parallel(self, tauvec, nsize=int(4./EPSREL)):
+        """generate_gamma_deltasigma_parallel 
+
+        Integrate over the xmis of signle mis-centered cluster
+        For a Gamma distribution P(xmis,tau)
+
+        Args:
+            tauvec (array): the gamma distribution tau value
+        """
+        _single = self._miscentered_deltasigma.copy()
+        nsize = self.table_x.size
+        x = self.table_xmis
+
+        res = np.zeros((tauvec.size,nsize))
+        for i,tau in enumerate(tauvec):
+            res[i] = np.trapz(self.probGamma(x, tau)[:,np.newaxis]*_single,x=x,axis=0)
+
+        self.table_tau = tauvec
+        self._gamma_deltasigma = res
+        self.gamma_delta_dict = self._todict('gamma','deltasigma')
+        pass
+    
+    def to_tsv(self, profile_type='sigma',kernel='single'):
+        ### file name
+        froot = self.table_fname
+        fname1 = froot+'_log_%s_%s.txt'%(profile_type, kernel)
+        fname2 = froot+'_logx.txt'
+        fname3 = froot+'_logxmis.txt'
+
+        # vectors 
+        vecgrid = self.getProfileGrid(kernel,profile_type)
+        xvec = self.table_x
+        yvec = {'single':self.table_xmis, 'gamma':self.table_tau}
+
+        write_vec(fname2, xvec, np.log)
+        write_vec(fname3, yvec[kernel], np.log)
+        write_grid(fname1, vecgrid, np.log)
+
+def write_vec(fname, vec, func=np.array):
+    # Save x data
+    xvec = func(vec)
+    with open(fname, 'w') as x_file:
+        x_file.write('\n'.join(str(x) for x in xvec))
+
+def write_grid(fname, gridvec, func=np.array):
+    # Save x data
+    zvec = func(gridvec)
+    with open(fname, 'w') as z_file:
+        for row in zvec:
+            z_file.write(' '.join(str(val) for val in row))
+            z_file.write('\n')
+
 ## Auxialiary Functions
 def funcQuadVal(r,rm,func,eps=EPSREL/10.):
     """Integrates a function (Sigma, DSigma) over theta for r, rm
@@ -462,6 +606,24 @@ def funcQuadVal(r,rm,func,eps=EPSREL/10.):
 
 def _sigmaMisQuad(t,r,rs):
     return f_nfw(np.sqrt(r**2+rs**2+2*r*rs*np.cos(t)))
+
+def _deltaSigmaMisQuad(t,r,rs):
+    return g_nfw(np.sqrt(r**2+rs**2+2*r*rs*np.cos(t)))
+
+def deltaSigmaMis(rvec,rmis,eps=1e-5):
+    """ NFW Off-Centered Profile (Quad Integration)
+    rvec : array
+        the radius value r/r_s
+    rmis : float
+        the off-centering radii value
+    """
+    res = np.zeros_like(rvec)
+    error = np.zeros_like(rvec)
+    for i in range(rvec.size):
+        integral, err = funcQuadVal(rvec[i],rmis, _deltaSigmaMisQuad)
+        res[i] = integral
+        error[i] = err
+    return res, error
 
 def sigmaMis(rvec,rmis,eps=1e-5):
     """ NFW Off-Centered Profile (Quad Integration)
@@ -497,9 +659,57 @@ def f_nfw(x, eps=1e-9):
     Args:
         x (array): Rp/Rs where Rs is the scale radius, Rs = R200/c
     """
+    if (isinstance(x,float))or(isinstance(x,int)): 
+        x = np.array([x])
+        
     res = 1/3.*np.ones_like(x)
-    res = np.where(x<1.,f_less_than(x),res)
-    res = np.where(x>1.,f_greater_than(x),res)
+
+    ix = np.where(x <= 1-eps)[0]
+    res[ix] = f_less_than(x[ix])
+    
+    ix = np.where(x>=1+eps)[0]
+    res[ix] = f_greater_than(x[ix])
+    return res
+
+### Compute \Delta \Sigma Analyticaly
+def g_less_than(x,core=4e-3):
+    # below core the solution fails numereically
+    x = np.where(x<core, core, x)
+    term1 = 8.0*np.arctanh(np.sqrt((1.0-x)/(1.0+x)))/(x**2*np.sqrt(1.0-x**2))
+    term2 = 4.0/x**2 * np.log(x/2.0)
+    term3 = -2.0/(x**2-1.0)
+    term4 = 4.0*np.arctanh(np.sqrt((1.0-x)/(1.0+x)))/((x**2-1.0)*np.sqrt(1.0-x**2))
+    return term1 + term2 + term3 + term4
+
+def g_greater_than(x, xmax=1e9):
+    # above xmax the function achieves machine precision
+    x = np.where(x>xmax, xmax, x)
+    term1 = 8.0*np.arctan(np.sqrt((x-1.0)/(1.0+x)))/(x**2*np.sqrt(x**2-1.0))
+    term2 = 4.0/x**2 * np.log(x/2.0)
+    term3 = -2.0/(x**2-1.0)
+    term4 = 4.0*np.arctan(np.sqrt((x-1.0)/(1.0+x)))/((x**2-1.0)**(3.0/2.0))
+    return term1 + term2 + term3 + term4
+
+def g_nfw(x, eps=1e-9):
+    """gNFW Eqn 15 and 16 Wright & Brained 2000
+
+    Analytical normalized shear/deltaSigma profile
+
+    Args:
+        x (array): Rp/Rs where Rs is the scale radius, Rs = R200/c
+    """
+    if (isinstance(x,float))or(isinstance(x,int)): 
+        x = np.array([x])
+            
+    res = np.zeros_like(x)
+    ix = np.where(np.abs(x-1) <= eps)[0]
+    res[ix] = 10./3. + 4*np.log(1/2.) 
+    
+    ix = np.where(x <= 1-eps)[0]
+    res[ix] = g_less_than(x[ix])
+    
+    ix = np.where(x>=1+eps)[0]
+    res[ix] = g_greater_than(x[ix])
     return res
 
 def get_adaptive_bin(xvec,fvec,Nsize=100):
