@@ -570,8 +570,8 @@ class NFWModel(object):
         ### file name
         froot = self.table_fname
         fname1 = froot+'_log_%s_%s.txt'%(profile_type, kernel)
-        fname2 = froot+'_logx.txt'
-        fname3 = froot+'_logxmis.txt'
+        fname2 = froot+'_%s_logx.txt'%(kernel)
+        fname3 = froot+'_%s_logxmis.txt'%(kernel)
 
         # vectors 
         vecgrid = self.getProfileGrid(kernel,profile_type)
