@@ -118,10 +118,10 @@ def main():
     
 if __name__ == "__main__":
     ########## SETUP ############
-    xlow, xhig = 1e-2, 1e5
-    Nsize = 10000
+    xlow, xhig = 1e-2, 1e4
+    Nsize = 1000
     ntasks = 20
-    nsize_per_task = 500
+    nsize_per_task = 50
     nCores = 20
     path = 'data'
     fnameOut = path+'/offset_nfw_table_%i_%.0e_%.0e'%(Nsize,xlow,xhig)
