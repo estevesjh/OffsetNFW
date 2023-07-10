@@ -1,7 +1,7 @@
 """ This code generates the sigma mis-centered library file
     of the NFWModel. The precision of the grid can be increased by Nsize.
     The range of the grid can also be adjusted. However, the precision of the integration
-    is hard code inside the NFWModel().generate_miscentered_sigma_parallel() code. 
+    is hard code inside the NFWModel() code. 
     To modify you should EPSABS = 1e-4; EPSREL = 1.49e-3 in the nfw.py file.
 """
 import numpy as np
