@@ -76,8 +76,12 @@ def buildMiscenteredSigma():
     # the addtional factors 1/10 and 100 
     # are setup to have good integration limits for the gamma function
     # the gamma distribution is asymmetrical, with a larger upper tail
-    x_ranges = np.logspace(np.log10(xlow)-1., np.log10(xhig) + 2., ntasks + 1)
-    x_ranges = [(x_ranges[i], x_ranges[i+1]) for i in range(ntasks)]
+    
+    # x_ranges = np.logspace(np.log10(xlow)-1., np.log10(xhig) + 2., ntasks + 1)
+    # x_ranges = [(x_ranges[i], x_ranges[i+1]) for i in range(ntasks)]
+
+    xvec = np.logspace(np.log10(xlow)-1., np.log10(xhig) + 2., int(nsize_per_task*ntasks))
+    x_ranges = [(xvec[i*nsize_per_task], xvec[(i+1)*nsize_per_task-1]) for i in range(ntasks)]
     check_path()
 
     # Create a multiprocessing pool with the desired number of processes
@@ -93,8 +97,8 @@ def buildMiscenteredSigma():
     join_all(fnameOut+'_miscentered.npz', datas)
 
 def buildGammaSigma():
-    x_ranges = np.logspace(np.log10(xlow), np.log10(xhig), ntasks + 1)
-    x_ranges = [(x_ranges[i], x_ranges[i+1]) for i in range(ntasks)]
+    xvec = np.logspace(np.log10(xlow), np.log10(xhig), int(nsize_per_task*ntasks))
+    x_ranges = [(xvec[i*nsize_per_task], xvec[(i+1)*nsize_per_task-1]) for i in range(ntasks)]
     check_path()
     
     # Create a multiprocessing pool with the desired number of processes
@@ -109,19 +113,31 @@ def buildGammaSigma():
     tupdate("joining all")
     join_all_gamma(fnameOut+'_gamma.npz', datas)
 
+def save_to_cpp():
+    import astropy.cosmology
+    cosmology = astropy.cosmology.Planck15
+    model = NFWModel(cosmology, Nsize=Nsize, x_range=(xlow, xhig))
+    model.to_tsv('deltasigma','gamma')
+    model.to_tsv('deltasigma','single')
+    model.to_tsv('sigma','single')
+    model.to_tsv('sigma','gamma')
+
 def main():
     tupdate("Build Miscentered Sigma")
     buildMiscenteredSigma()
 
     tupdate("Build Gamma Sigma")
     buildGammaSigma()
+
+    tupdate("Setup the output file to c++")
+    save_to_cpp()
     
 if __name__ == "__main__":
     ########## SETUP ############
     xlow, xhig = 1e-2, 1e4
-    Nsize = 1000
+    Nsize = 500
     ntasks = 20
-    nsize_per_task = 50
+    nsize_per_task = 25
     nCores = 20
     path = 'data'
     fnameOut = path+'/offset_nfw_table_%i_%.0e_%.0e'%(Nsize,xlow,xhig)
