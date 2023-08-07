@@ -404,10 +404,12 @@ class NFWModel(object):
         return np.exp(-R/Rs)*R/Rs**2
 
     def _buildMiscenteredDeltaSigma(self, save=True):
-        self._miscentered_deltasigma = np.array([self.sigma_to_deltasigma(self.table_x, ms) for ms in self._miscentered_sigma])
+        res = np.array([self.sigma_to_deltasigma(self.table_x, ms) for ms in self._miscentered_sigma])
+        self._miscentered_deltasigma = np.where(res<1e-12,0.,res)
     
     def _buildGammaDeltaSigma(self, save=True):
-        self._gamma_deltasigma = np.array([self.sigma_to_deltasigma(self.table_x, ms) for ms in self._gamma_sigma])
+        res = np.array([self.sigma_to_deltasigma(self.table_x, ms) for ms in self._gamma_sigma])
+        self._gamma_deltasigma = np.where(res<1e-12,0.,res)
 
     def getProfileFunction(self, kernel, ptype):
         """ Given a kernel and profile type string return the respective interpolation function
@@ -430,7 +432,7 @@ class NFWModel(object):
         return getattr(self, var_name)
 
     
-    def generate_miscentered_sigma_parallel(self,x,nsize=4000):
+    def generate_miscentered_sigma_parallel(self,x,nsize=1000):
         """generate_miscentered_sigma_parallel 
 
         Uses a rectangular grid instead of a square one.
@@ -441,7 +443,6 @@ class NFWModel(object):
         xmis = self.table_x
         res = np.zeros((xmis.size, x.size))
         error = np.zeros(xmis.size)
-        
         for i,rmis in enumerate(xmis):
             ratio = x/rmis
 
@@ -562,7 +563,7 @@ class NFWModel(object):
             res[i] = np.trapz(self.probGamma(x, tau)[:,np.newaxis]*_single,x=x,axis=0)
 
         self.table_tau = tauvec
-        self._gamma_deltasigma = res
+        self._gamma_deltasigma = np.where(res<1e-12,0.,res)
         self.gamma_delta_dict = self._todict('gamma','deltasigma')
         pass
     
@@ -580,7 +581,7 @@ class NFWModel(object):
 
         write_vec(fname2, xvec, np.log)
         write_vec(fname3, yvec[kernel], np.log)
-        write_grid(fname1, vecgrid, np.log)
+        write_grid(fname1, vecgrid+1e-12, np.log)
 
 def write_vec(fname, vec, func=np.array):
     # Save x data
@@ -710,7 +711,7 @@ def g_nfw(x, eps=1e-9):
     
     ix = np.where(x>=1+eps)[0]
     res[ix] = g_greater_than(x[ix])
-    return res
+    return res/2.
 
 def get_adaptive_bin(xvec,fvec,Nsize=100):
     fcsum = np.cumsum(fvec,axis=0)
